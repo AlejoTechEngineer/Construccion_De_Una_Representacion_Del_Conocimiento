@@ -2,7 +2,7 @@
 
 **Asignatura:** Sistemas Inteligentes  
 **Estudiante:** Alejandro De Mendoza Tovar  
-**Profesor:** Ing. Rogerio Orlando Beltrán Castro  
+**Profesor:** Ing. Juan Carlos Reyes Figueroa  
 **Universidad:** Fundación Universitaria Internacional de La Rioja  
 **Fecha:** Mayo 2026  
 
