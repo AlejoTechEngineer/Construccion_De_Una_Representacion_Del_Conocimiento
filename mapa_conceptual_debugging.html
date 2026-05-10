@@ -1,0 +1,804 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<title>Mapa Conceptual — Debugging</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/d3/7.8.5/d3.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#07090f;font-family:'Inter',sans-serif;overflow:hidden;height:100vh}
+#bar{position:fixed;top:0;left:0;right:0;z-index:100;background:rgba(7,9,15,.97);
+  border-bottom:1px solid #1a2035;padding:6px 14px;
+  display:flex;align-items:center;gap:10px}
+#bar h1{font-size:11px;font-weight:600;color:#60a5fa;white-space:nowrap}
+.sep{width:1px;height:16px;background:#1a2035}
+.btn{background:#0f1626;border:1px solid #1a2035;color:#94a3b8;
+  padding:3px 10px;border-radius:5px;font-size:10px;cursor:pointer;transition:all .15s}
+.btn:hover{border-color:#3b82f6;color:#60a5fa}
+.btn.on{background:#1e3a5f;color:#60a5fa;border-color:#3b82f6}
+#hint{font-size:9px;color:#374151}
+svg{display:block;cursor:grab}svg:active{cursor:grabbing}
+.nc{cursor:pointer}.nc:hover .nr{filter:brightness(1.3)}
+.nr{transition:filter .15s}
+.nt,.ns{pointer-events:none;font-family:'Inter',sans-serif}
+.edge,.xedge{fill:none}
+.xedge{stroke-dasharray:5,3}
+/* panel */
+#panel{position:fixed;right:10px;top:44px;z-index:200;width:260px;
+  background:rgba(7,9,15,.98);border:1px solid #1a2035;border-radius:9px;
+  padding:14px;display:none;max-height:80vh;overflow-y:auto}
+#panel h3{color:#60a5fa;font-size:11px;font-weight:600;margin-bottom:6px;line-height:1.5}
+.pd{color:#94a3b8;font-size:10px;line-height:1.7;margin-bottom:8px}
+.ptags{display:flex;flex-wrap:wrap;gap:3px}
+.tag{background:#1e3a5f;color:#93c5fd;border-radius:3px;
+  padding:1px 6px;font-size:8px;font-family:monospace}
+.nx{float:right;cursor:pointer;color:#374151;font-size:13px}.nx:hover{color:#e2e8f0}
+</style>
+</head>
+<body>
+<div id="bar">
+  <h1>🐛 Mapa Conceptual · Representación del Conocimiento · Resolver un Bug en Código</h1>
+  <div class="sep"></div>
+  <button class="btn on" id="bX" onclick="toggleX()">⇆ Relaciones cruzadas</button>
+  <button class="btn" onclick="fitView()">⊡ Ver todo</button>
+  <button class="btn" onclick="dl()">⬇ Exportar PNG</button>
+  <div class="sep"></div>
+  <span id="hint">Scroll=zoom · Drag=mover · Click=detalle</span>
+</div>
+
+<div id="panel">
+  <span class="nx" onclick="this.parentElement.style.display='none'">✕</span>
+  <h3 id="pt"></h3><div id="pnv"></div>
+  <div class="pd" id="pd"></div>
+  <div class="ptags" id="pg"></div>
+</div>
+
+<svg id="svg"></svg>
+<canvas id="cv" style="display:none"></canvas>
+
+<script>
+// ═══════════════════════════════════════════════════════════════
+// CONFIGURACIÓN DEL GRID
+// 7 columnas = ROOT + 6 características
+// 8 niveles hacia abajo (filas 0..7)
+// Cada celda: W=155px H=62px GAP_X=12px GAP_Y=18px
+// ═══════════════════════════════════════════════════════════════
+const CW=162, CH=84, GX=10, GY=16;
+const COLS=7, ROWS=9; // fila 0=raíz, filas 1-8=niveles
+
+// Posición de celda (col 0-6, row 0-8)
+// col 0 = ROOT centrado, cols 1-6 = C1..C6
+const px=(col,row)=>col*(CW+GX);
+const py=(row)=>row*(CH+GY)+50;
+
+// ROOT centrado sobre las 6 características
+const rootX = (CW+GX)*0 + (6*(CW+GX))/2 - CW/2;
+
+// ═══════════════════════════════════════════════════════════════
+// COLORES POR NIVEL (fila)
+// ═══════════════════════════════════════════════════════════════
+const LC=[
+ {f:'#0c2640',s:'#0ea5e9',t:'#e0f2fe'},  // 0 raíz
+ {f:'#0f2040',s:'#3b82f6',t:'#bfdbfe'},  // 1 características
+ {f:'#062b1a',s:'#10b981',t:'#a7f3d0'},  // 2
+ {f:'#0a2010',s:'#22c55e',t:'#bbf7d0'},  // 3
+ {f:'#200a3a',s:'#a855f7',t:'#e9d5ff'},  // 4
+ {f:'#281400',s:'#f59e0b',t:'#fde68a'},  // 5
+ {f:'#0a1830',s:'#60a5fa',t:'#bfdbfe'},  // 6
+ {f:'#0d1a10',s:'#4ade80',t:'#dcfce7'},  // 7
+ {f:'#2a0808',s:'#f87171',t:'#fecaca'},  // 8 limitaciones/detalles
+];
+const LIMC={f:'#380808',s:'#ef4444',t:'#fecaca'};
+const OKAC={f:'#052e10',s:'#16a34a',t:'#bbf7d0'};
+const MEDC={f:'#3a1000',s:'#ea580c',t:'#fed7aa'};
+const BAJC={f:'#3a0808',s:'#dc2626',t:'#fecaca'};
+
+// ═══════════════════════════════════════════════════════════════
+// NODOS — cada nodo: id, col (0-6), row (0-8), label, sublabel,
+//         desc (panel), tags, col/stk/tc opcionales, nv (ALTO/MEDIO/BAJO)
+// Las 6 características van en fila 1, cols 1-6
+// Cada característica baja verticalmente hasta fila 8
+// ═══════════════════════════════════════════════════════════════
+const N=[
+// ─── RAÍZ fila 0 ────────────────────────────────────────────────
+{id:'R', col:3, row:0, lbl:'REPRESENTACIÓN\nDEL CONOCIMIENTO',
+ sub:'Actividad: Resolver un Bug\nMétodo: Mapa Conceptual',
+ D:'Nodo raíz. La actividad de resolver bugs en código involucra 10 tipos de conocimiento: declarativo, procedimental, heurístico, causal, condicional, meta-cognitivo, evaluativo, social, normativo y taxonómico. Evaluada por las 6 características fundamentales.',
+ T:['Debugging','Mapa Conceptual','6 Características']},
+
+// ─── FILA 1: 6 CARACTERÍSTICAS ──────────────────────────────────
+{id:'C1',col:0,row:1,lbl:'① COBERTURA',nv:'ALTO',
+ sub:'Plasmar TODOS los hechos\nen anchura y profundidad',
+ D:'Nivel ALTO. Cubre 8 categorías, 14 pasos y 10 tipos epistémicos. La representación cubre exhaustivamente el dominio del debugging tanto en amplitud como en detalle por cada nodo.',
+ T:['Cobertura','Amplitud','Profundidad']},
+{id:'C2',col:1,row:1,lbl:'② COMPRENSIÓN\nPOR HUMANOS',nv:'ALTO',
+ sub:'Facilidad para leer,\nvalidar y razonar',
+ D:'Nivel ALTO. Lenguaje natural del dominio del programador, estructura visual jerarquizada, código de color por nivel. Validable directamente por desarrolladores senior sin conocer IA.',
+ T:['Comprensión','Legibilidad','Validación']},
+{id:'C3',col:2,row:1,lbl:'③ CONSISTENCIA',nv:'ALTO',
+ sub:'Sin contradicciones internas\nCoherencia entre elementos',
+ D:'Nivel ALTO. Fases en orden lógico con precondiciones explícitas, ciclos de retroalimentación semánticamente correctos, clasificación epistémica uniforme, tensiones explícitamente resueltas.',
+ T:['Consistencia','Coherencia']},
+{id:'C4',col:3,row:1,lbl:'④ ADECUACIÓN\nEXPRESIVIDAD',nv:'MEDIO',
+ sub:'Capacidad del formalismo\npara expresar el conocimiento',
+ D:'Nivel MEDIO. Expresa bien lo procedimental, heurístico y causal (tipos dominantes en debugging). No puede expresar incertidumbre probabilística, analogía ni conocimiento cuantitativo continuo.',
+ T:['Expresividad','Adecuación']},
+{id:'C5',col:4,row:1,lbl:'⑤ EFICIENCIA\nINFERENCIAL',nv:'BAJO',
+ sub:'Facilidad de un motor para\ndeducir nuevo conocimiento',
+ D:'Nivel BAJO. El mapa conceptual no es ejecutable directamente. Un motor de inferencia no puede razonar sobre nodos visuales sin transformación previa a un formalismo computacional.',
+ T:['Inferencia','Ejecutabilidad']},
+{id:'C6',col:5,row:1,lbl:'⑥ MODIFICACIÓN\nY ADQUISICIÓN',nv:'ALTO',
+ sub:'Incorporar o corregir\nconocimiento sin reestructurar',
+ D:'Nivel ALTO. Estructura modular: cada nodo es independiente. Ciclo de adquisición 5-10x más rápido que con formalismos ejecutables. Validación experta directa sin intermediarios técnicos.',
+ T:['Modificación','Adquisición']},
+{id:'CREL',col:6,row:1,lbl:'RELACIONES\nCRUZADAS',
+ sub:'Las 6 características\nse influyen mutuamente',
+ D:'Las 6 características no son independientes: se interrelacionan mediante 10 relaciones cruzadas explícitas. Cada relación describe cómo una característica influye, habilita, tensiona o determina a otra.',
+ T:['Relaciones','Cruzadas','Interdependencias']},
+
+// ─── FILA 2 ───────────────────────────────────────────────────
+{id:'C1_2',col:0,row:2,lbl:'8 Categorías cubiertas',
+ sub:'5 fases + meta-control\n+ errores + taxonomía',
+ D:'La cobertura en anchura incluye: 5 fases del proceso (Observación, Hipótesis, Diagnóstico, Reparación, Verificación), 1 categoría de meta-control cognitivo, 1 de errores frecuentes del proceso, y 1 de tipos epistémicos.',
+ T:['8 categorías','Anchura']},
+{id:'C2_2',col:1,row:2,lbl:'Lenguaje del dominio',
+ sub:'Vocabulario del programador\nsin notación matemática',
+ D:'Usa exclusivamente vocabulario que un desarrollador usa a diario: stack trace, git bisect, rubber duck, code review, test de regresión, off-by-one. Sin lógica formal ni símbolos abstractos.',
+ T:['Lenguaje','Natural','Dominio']},
+{id:'C3_2',col:2,row:2,lbl:'Orden lógico de fases',
+ sub:'Cada fase con precondiciones\nsatisfechas por la anterior',
+ D:'Observar→Hipotetizar→Diagnosticar→Reparar→Verificar: cada transición tiene precondiciones lógicas. No se puede diagnosticar sin hipótesis, ni reparar sin diagnóstico identificado.',
+ T:['Orden','Precondiciones']},
+{id:'C4_2',col:3,row:2,lbl:'LO QUE LOGRA',
+ sub:'Procedimental · Condicional\nHeurístico · Causal',
+ D:'El mapa expresa correctamente: conocimiento procedimental (secuencias de pasos), condicional (reglas IF-THEN como ramas), heurístico (reglas empíricas en lenguaje natural) y causal (relaciones causa-efecto etiquetadas).',
+ T:['Logra','Tipos cubiertos']},
+{id:'C5_2',col:4,row:2,lbl:'Por qué nivel BAJO',
+ sub:'Mapa = consulta humana\nNo es formalismo computable',
+ D:'Un motor de inferencia necesita reglas con sintaxis formal parseable, predicados precisos, axiomas y base de hechos estructurada. El mapa visual no provee esto directamente.',
+ T:['No ejecutable','Motor']},
+{id:'C6_2',col:5,row:2,lbl:'Modificación local',
+ sub:'Cambio en un nodo no afecta\nal resto de la representación',
+ D:'La modularidad garantiza que modificar una regla heurística, un paso o una clasificación epistémica solo afecta al nodo modificado. Los ciclos de retroalimentación y la lógica general permanecen inalterados.',
+ T:['Modular','Local']},
+{id:'CREL_2',col:6,row:2,lbl:'C1 → C4',
+ sub:'+ cobertura exige\n+ expresividad del formalismo',
+ D:'Relación cruzada: Si se quiere cubrir más tipos de conocimiento (probabilístico, analógico), el formalismo necesita ser más expresivo. La cobertura deseada tensiona con la expresividad del método elegido.',
+ T:['C1','C4','Tensión']},
+
+// ─── FILA 3 ───────────────────────────────────────────────────
+{id:'C1_3',col:0,row:3,lbl:'10 Tipos epistémicos',
+ sub:'Declarativo · Procedimental\nHeurístico · Causal · Condicional\nMeta-cog · Eval · Social · Norm · Tax',
+ D:'Los 10 tipos epistémicos documentados en el mapa cubren la dimensión en profundidad: cada uno de los 14 pasos clasifica el conocimiento que requiere en al menos uno de estos tipos.',
+ T:['10 tipos','Profundidad','Epistémico']},
+{id:'C2_3',col:1,row:3,lbl:'Estructura visual jerarquizada',
+ sub:'Layout top-down · Código de color\nEtiquetas semánticas en flechas',
+ D:'El mapa usa jerarquía visual con código de color por nivel de profundidad y etiquetas semánticas en cada flecha. Esto permite distinguir el rol de cada nodo sin leer su contenido.',
+ T:['Visual','Jerarquía','Color']},
+{id:'C3_3',col:2,row:3,lbl:'Ciclos de retroalimentación',
+ sub:'Diagnóstico→Hipótesis\nVerificación→Reparación',
+ D:'Los dos ciclos de retroalimentación son semánticamente precisos: cuando diagnóstico no halla causa → regresa a hipótesis (la evidencia ya existe, falta la teoría). Cuando tests fallan → regresa a reparación (la causa ya fue identificada, el problema es la implementación).',
+ T:['Retroalimentación','Ciclos']},
+{id:'C4_3',col:3,row:3,lbl:'LO QUE NO LOGRA',
+ sub:'Incertidumbre probabilística\nAnálogía · Conocimiento cuantitativo',
+ D:'Tres tipos no representables en el mapa: (1) Probabilístico: "70% de NPE = variable no inicializada" → requiere Red Bayesiana. (2) Analogía: razonamiento con casos pasados → requiere CBR. (3) Cuantitativo: métricas y umbrales → requiere modelos numéricos.',
+ D:'Tres tipos de conocimiento fuera del alcance del mapa conceptual: incertidumbre probabilística, razonamiento por analogía con casos pasados, y conocimiento cuantitativo continuo con umbrales numéricos.',
+ T:['No logra','Limitaciones']},
+{id:'C5_3',col:4,row:3,lbl:'Formalismos requeridos',
+ sub:'CLIPS/Drools · Prolog\nOWL/RDF · HTN',
+ D:'Para habilitar razonamiento automático se requiere migrar el conocimiento del mapa a formalismos ejecutables: CLIPS o Drools para conocimiento condicional, Prolog para causal, OWL/RDF para taxonomías, HTN para planificación del proceso.',
+ T:['CLIPS','Prolog','OWL','HTN']},
+{id:'C6_3',col:5,row:3,lbl:'Adquisición directa',
+ sub:'Experto valida sin intermediarios\nciclo 5-10x más corto que Prolog/OWL',
+ D:'El experto del dominio puede validar directamente sobre el mapa visual sin necesitar conocer ningún formalismo de IA. Comparado con Prolog u OWL, el ciclo de adquisición es 5-10 veces más rápido.',
+ T:['Adquisición','Directa','Ciclo corto']},
+{id:'CREL_3',col:6,row:3,lbl:'C1 → C5',
+ sub:'+ hechos cubiertos =\n+ costo computacional de inferencia',
+ D:'Relación cruzada: A mayor cobertura, mayor es la base de hechos sobre la que el motor debe razonar. Más cobertura incrementa el espacio de búsqueda del motor de inferencia.',
+ T:['C1','C5','Fundamento']},
+
+// ─── FILA 4 ───────────────────────────────────────────────────
+{id:'C1_4',col:0,row:4,lbl:'14 pasos con contenido completo',
+ sub:'Cada paso incluye:\n• Conocimiento requerido\n• Técnica de aplicación\n• Tipo epistémico',
+ D:'La profundidad se evidencia en que cada uno de los 14 pasos documentados en el mapa incluye: el conocimiento específico necesario para ejecutarlo, la técnica o regla de aplicación concreta, y el tipo epistémico al que pertenece.',
+ T:['14 pasos','Detalle','Profundidad']},
+{id:'C2_4',col:1,row:4,lbl:'Validación activa por experto',
+ sub:'No solo legible (pasivo)\nsino corregible y ampliable (activo)',
+ D:'La comprensión activa permite al experto no solo leer sino corregir: detectar una heurística incorrecta, agregar una regla faltante, reordenar pasos que no reflejen la práctica real, o proponer un nuevo tipo de bug no cubierto.',
+ T:['Validación activa','Experto']},
+{id:'C3_4',col:2,row:4,lbl:'Tensiones resueltas',
+ sub:'Meta-control interrumpe el flujo\n→ resuelto como carril paralelo\nno como paso obligatorio',
+ D:'El meta-control (gestión cognitiva) podría parecer inconsistente con el flujo secuencial. Se resuelve modelándolo como proceso paralelo activado por condición (tiempo sin progreso > 30 min), no como fase de la secuencia.',
+ T:['Tensión','Meta-control','Paralelo']},
+{id:'C4_4',col:3,row:4,lbl:'Ejemplo: regla condicional',
+ sub:'SI compilado → debugger\nSI interpretado → logs+REPL\nSI >30min sin avance → descanso',
+ D:'Ejemplo de conocimiento condicional expresado en el mapa: la selección de herramienta de diagnóstico depende del tipo de lenguaje (compilado vs interpretado), y la activación del meta-control depende del tiempo sin progreso.',
+ T:['Condicional','Ejemplo','IF-THEN']},
+{id:'C5_4',col:4,row:4,lbl:'CLIPS / Drools',
+ sub:'Para conocimiento condicional\nIF condicion THEN accion\nEncadenamiento hacia adelante',
+ D:'Las reglas condicionales del mapa se mapean directamente a reglas IF-THEN en CLIPS o Drools. Estos motores de reglas ejecutan el conocimiento mediante encadenamiento hacia adelante (forward chaining).',
+ T:['CLIPS','Drools','Forward chaining']},
+{id:'C6_4',col:5,row:4,lbl:'Extensible sin reestructurar',
+ sub:'+ fase SEGURIDAD → nueva rama\n+ Rust borrow checker → nuevo nodo\n+ Valgrind → nueva hoja',
+ D:'El mapa puede extenderse sin modificar la estructura existente: agregar una fase de verificación de seguridad (nueva rama en Verificación), conocimiento específico de Rust (nuevo sub-nodo en Diagnóstico), o herramientas nuevas (nuevas hojas).',
+ T:['Extensible','Sin reestructurar']},
+{id:'CREL_4',col:6,row:4,lbl:'C2 → C3',
+ sub:'Lo comprensible facilita\ndetectar contradicciones',
+ D:'Relación cruzada: Cuando la representación es legible, los expertos pueden detectar inconsistencias directamente leyendo el mapa, sin necesitar herramientas formales de verificación de consistencia.',
+ T:['C2','C3','Favorece']},
+
+// ─── FILA 5 ───────────────────────────────────────────────────
+{id:'C1_5',col:0,row:5,lbl:'Limitación: conocimiento tácito',
+ sub:'El experto sabe pero no verbaliza\nNo formalizable en ningún mapa',
+ col_c:LIMC,
+ D:'Limitación fundamental de la cobertura: el conocimiento tácito del experto senior (reconocer un bug por el "olor" del código, predecir la causa con mínima información) no puede verbalizarse ni capturarse en ningún mapa conceptual.',
+ T:['Tácito','Limitación','Cuello de botella']},
+{id:'C2_5',col:1,row:5,lbl:'Impacto en ciclo de adquisición',
+ sub:'Lenguaje natural = experto valida sin\nintermediarios → 5-10x más rápido',
+ D:'El uso de lenguaje natural reduce el ciclo de adquisición del conocimiento: el experto puede señalar errores directamente sobre el mapa sin que un ingeniero de conocimiento traduzca sus correcciones a formalismo.',
+ T:['Ciclo','Adquisición','Impacto']},
+{id:'C3_5',col:2,row:5,lbl:'Clasificación epistémica uniforme',
+ sub:'Mismo criterio en los 14 nodos\nSin asignaciones contradictorias',
+ D:'La consistencia de la clasificación epistémica garantiza que el mismo criterio se aplica en todos los nodos. No hay un nodo donde un conocimiento claramente heurístico se clasifique como declarativo, ni viceversa.',
+ T:['Clasificación','Uniforme','Coherencia']},
+{id:'C4_5',col:3,row:5,lbl:'Ejemplo: relación causal',
+ sub:'Causa: fix del síntoma\nEfecto: nuevos bugs introducidos\nporque el problema subyacente persiste',
+ D:'Una relación causal documentada en el mapa: corregir el síntoma visible sin entender la causa real introduce nuevos bugs, porque el problema subyacente persiste e interactúa con el nuevo código de forma inesperada.',
+ T:['Causal','Ejemplo','Fix del síntoma']},
+{id:'C5_5',col:4,row:5,lbl:'Prolog / Datalog',
+ sub:'Para conocimiento causal\ncausa(bug,X) :- condiciones.\nEncadenamiento hacia atrás',
+ D:'Las relaciones causales del mapa se formalizan como cláusulas Horn en Prolog. El motor responde consultas como "¿cuáles son las causas posibles dado este stack trace?" usando encadenamiento hacia atrás (backward chaining).',
+ T:['Prolog','Datalog','Backward chaining']},
+{id:'C6_5',col:5,row:5,lbl:'Proceso de adquisición',
+ sub:'1. Think-aloud al experto\n2. Transcribir en lenguaje natural\n3. Agregar nodos al mapa\n4. Experto valida directamente',
+ D:'El ciclo de adquisición: sesión think-aloud donde el experto habla mientras debuggea, transcripción de sus reglas en lenguaje natural, incorporación al mapa como nodos, y validación directa por el experto sobre el mapa visual.',
+ T:['Think-aloud','Proceso','Ciclo']},
+{id:'CREL_5',col:6,row:5,lbl:'C2 → C6',
+ sub:'Lo comprensible permite adquisición\ndirecta por expertos del dominio',
+ D:'Relación cruzada: Una representación comprensible para humanos reduce la fricción de adquisición. Los expertos pueden aportar y corregir conocimiento directamente, sin necesidad de intermediarios técnicos.',
+ T:['C2','C6','Facilita']},
+
+// ─── FILA 6 ───────────────────────────────────────────────────
+{id:'C1_6',col:0,row:6,lbl:'Técnicas para capturar lo tácito',
+ sub:'Think-aloud · Grabación de sesiones\nAnálisis de commits · Minería de logs',
+ col_c:LIMC,
+ D:'Para intentar capturar el conocimiento tácito: think-aloud (el experto habla mientras debuggea), grabación y análisis posterior de sesiones, análisis de commits históricos para inducir patrones, y minería de logs de depuración para identificar secuencias frecuentes.',
+ T:['Think-aloud','Minería','Técnicas']},
+{id:'C2_6',col:1,row:6,lbl:'Contraste con formalismos',
+ sub:'Prolog: solo legible por especialistas\nOWL: requiere editor Protégé\nMapa: todo programador puede leer',
+ D:'Comparado con formalismos como Prolog u OWL con Protégé, el mapa conceptual es órdenes de magnitud más accesible para el experto del dominio, aunque menos potente para razonamiento automático.',
+ T:['Comparación','Prolog','OWL']},
+{id:'C3_6',col:2,row:6,lbl:'Verificación de consistencia',
+ sub:'Un senior puede leer el mapa completo\ny confirmar que no hay contradicciones\n→ Demostración práctica',
+ D:'La mejor demostración de consistencia: cualquier desarrollador senior puede leer el mapa completo y confirmar que el proceso descrito refleja exactamente la práctica profesional real sin contradicciones.',
+ T:['Verificación','Práctica','Demostración']},
+{id:'C4_6',col:3,row:6,lbl:'Formalización a CLIPS',
+ sub:'(defrule tool-selection\n  (lenguaje-compilado)\n  => (assert (herramienta debugger)))',
+ D:'La regla condicional del mapa puede formalizarse directamente a CLIPS. Esto ilustra la relación C4→C5: lo que el mapa puede expresar (adecuación) puede migrarse a formalismos ejecutables (eficiencia inferencial).',
+ T:['CLIPS','Formalización','Ejemplo ejecutable']},
+{id:'C5_6',col:4,row:6,lbl:'OWL / RDF',
+ sub:'Para conocimiento taxonómico\nJerarquía de bugs como ontología\nInferencia automática por herencia',
+ D:'La taxonomía de tipos de bugs del mapa se modela como ontología OWL. El razonador (Pellet, HermiT) puede clasificar nuevos bugs por sus propiedades e inferir relaciones por herencia automáticamente.',
+ T:['OWL','RDF','Ontología','Inferencia']},
+{id:'C6_6',col:5,row:6,lbl:'Limitación: cuello de botella tácito',
+ sub:'Conocimiento tácito no verbalizable\nLímite fundamental de toda adquisición',
+ col_c:LIMC,
+ D:'El principal obstáculo es el conocimiento tácito del experto: la intuición que identifica un bug en segundos no puede describirse completamente. Este límite es inherente a cualquier método de adquisición del conocimiento, no específico del mapa.',
+ T:['Tácito','Límite fundamental']},
+{id:'CREL_6',col:6,row:6,lbl:'C3 → C5',
+ sub:'Sin consistencia interna\nla inferencia produce errores\n(ex contradictione quodlibet)',
+ D:'Relación cruzada: La consistencia es prerrequisito de la inferencia correcta. De una base de conocimiento contradictoria se puede deducir cualquier conclusión, incluyendo las falsas (principio lógico ex contradictione quodlibet).',
+ T:['C3','C5','Habilita']},
+
+// ─── FILA 7 ───────────────────────────────────────────────────
+{id:'C1_7',col:0,row:7,lbl:'Implicación para el diseño del sistema',
+ sub:'Mapa conceptual (conocimiento explícito)\n+ CBR (conocimiento analógico)\n= cobertura más completa del debugging',
+ D:'La combinación de un mapa conceptual para el conocimiento explícito con un sistema de razonamiento basado en casos (CBR) para el conocimiento analógico cubriría más completamente el dominio del debugging que cualquiera de los dos por separado.',
+ T:['CBR','Diseño','Sistema experto']},
+{id:'C2_7',col:1,row:7,lbl:'Niveles de lectura',
+ sub:'Nivel ejecutivo: 6 características\nNivel técnico: niveles 2-4\nNivel de detalle: niveles 5-8',
+ D:'El mapa soporta múltiples niveles de lectura: visión general (solo las 6 características), análisis completo (niveles 2-4), y detalle técnico máximo (niveles 5-8 con ejemplos de código ejecutable y límites formales).',
+ T:['Niveles','Abstracción','Lectura']},
+{id:'C3_7',col:2,row:7,lbl:'Relación C3 → C5',
+ sub:'Consistencia habilita inferencia:\nbase coherente → deducciones correctas\nBase contradictoria → cualquier conclusión',
+ D:'La relación cruzada más importante para la eficiencia inferencial: sin consistencia interna, cualquier motor de inferencia puede deducir conclusiones erróneas o contradictorias. La consistencia del mapa es un prerrequisito para cualquier formalización futura.',
+ T:['C3','C5','Prerrequisito']},
+{id:'C4_7',col:3,row:7,lbl:'Implicación C4 → C5',
+ sub:'La expresividad determina\nel techo de la eficiencia inferencial:\nsolo lo expresable puede ser inferido',
+ D:'Relación cruzada fundamental: C4 determina C5. La eficiencia inferencial está acotada superiormente por la expresividad. Un motor no puede razonar sobre lo que no está representado. El mapa con nivel MEDIO en C4 limita el potencial de C5.',
+ T:['C4','C5','Determina']},
+{id:'C5_7',col:4,row:7,lbl:'HTN (Hierarchical Task Network)',
+ sub:'Para el proceso completo\nFases con precondiciones y efectos\n→ plan automático de debugging',
+ D:'Las fases del debugging se formalizan como tareas HTN con precondiciones y efectos. El planificador genera automáticamente el plan de debugging más adecuado dado el tipo de error observado.',
+ T:['HTN','Planificación','SHOP2']},
+{id:'C6_7',col:5,row:7,lbl:'Relaciones C6 → C1 y C6 → C3',
+ sub:'C6→C1: modificación fácil mantiene\nla cobertura actualizada\nC6→C3: modularidad preserva consistencia',
+ D:'Dos relaciones cruzadas de C6: (1) C6→C1: la facilidad de modificación garantiza que la cobertura no quede obsoleta al evolucionar el dominio. (2) C6→C3: la modularidad garantiza que agregar nuevo conocimiento no introduce contradicciones.',
+ T:['C6','C1','C3','Mantiene','Preserva']},
+{id:'CREL_7',col:6,row:7,lbl:'C4 → C5',
+ sub:'Solo lo expresable puede ser inferido\nExpresividad determina el techo\nde la eficiencia inferencial',
+ D:'Relación cruzada fundamental: la eficiencia inferencial (C5) está acotada por la expresividad (C4). El mapa con nivel MEDIO en expresividad limita las inferencias posibles. Mejorar C4 (usar un formalismo más expresivo) permitiría mejorar C5.',
+ T:['C4','C5','Determina']},
+
+// ─── FILA 8 ───────────────────────────────────────────────────
+{id:'C1_8',col:0,row:8,lbl:'CONCLUSIÓN COBERTURA',
+ sub:'ALTO: el mapa cubre exhaustivamente\nel dominio del debugging\nLímite: conocimiento tácito del experto',
+ col_c:OKAC,
+ D:'Conclusión: La cobertura es la característica más fuerte del mapa. 8 categorías, 14 pasos detallados y 10 tipos epistémicos garantizan una representación exhaustiva del conocimiento explícito del debugging. La única limitación es el conocimiento tácito del experto, inherente a cualquier método de representación.',
+ T:['Conclusión','Cobertura','ALTO']},
+{id:'C2_8',col:1,row:8,lbl:'CONCLUSIÓN COMPRENSIÓN',
+ sub:'ALTO: lenguaje natural + estructura visual\nPermite validación directa por expertos\nSin barreras técnicas de entrada',
+ col_c:OKAC,
+ D:'Conclusión: La comprensión por humanos es muy alta gracias al uso de lenguaje natural del dominio y la estructura visual jerarquizada. Cualquier desarrollador senior puede validar, corregir o ampliar el mapa directamente, sin necesitar formación en IA.',
+ T:['Conclusión','Comprensión','ALTO']},
+{id:'C3_8',col:2,row:8,lbl:'CONCLUSIÓN CONSISTENCIA',
+ sub:'ALTO: fases en orden correcto\nciclos semánticamente precisos\ntensiones explícitamente resueltas',
+ col_c:OKAC,
+ D:'Conclusión: La consistencia interna del mapa es sólida. Las fases siguen el orden lógico del debugging profesional, los ciclos de retroalimentación son semánticamente correctos, y las tensiones detectadas (como el meta-control) están explícitamente resueltas.',
+ T:['Conclusión','Consistencia','ALTO']},
+{id:'C4_8',col:3,row:8,lbl:'CONCLUSIÓN EXPRESIVIDAD',
+ sub:'MEDIO: captura ~75% del conocimiento\nFalta: probabilístico, analógico,\ncuantitativo continuo',
+ col_c:MEDC,
+ D:'Conclusión: La adecuación representacional es media. El mapa captura aproximadamente el 75% del conocimiento del dominio (todo lo procedimental, heurístico y causal). El 25% restante (probabilístico, analógico, cuantitativo) requiere formalismos complementarios como redes bayesianas o CBR.',
+ T:['Conclusión','Expresividad','MEDIO']},
+{id:'C5_8',col:4,row:8,lbl:'CONCLUSIÓN EFICIENCIA INFERENCIAL',
+ sub:'BAJO: mapa no ejecutable directamente\nValor: representación intermedia de calidad\npara migrar a CLIPS/Prolog/OWL/HTN',
+ col_c:BAJC,
+ D:'Conclusión: La eficiencia inferencial es baja por diseño del método elegido. Sin embargo, el mapa tiene un valor significativo como representación intermedia de alta calidad: su estructura semántica clara facilita la migración a cualquier formalismo ejecutable.',
+ T:['Conclusión','Eficiencia','BAJO']},
+{id:'C6_8',col:5,row:8,lbl:'CONCLUSIÓN MODIFICACIÓN',
+ sub:'ALTO: estructura modular\ncambios locales sin propagación\nadquisición directa 5-10x más rápida',
+ col_c:OKAC,
+ D:'Conclusión: La facilidad de modificación y adquisición es muy alta. La modularidad permite cambios locales sin afectar el resto. El ciclo de adquisición directa por expertos es 5-10 veces más rápido que con formalismos ejecutables como Prolog u OWL.',
+ T:['Conclusión','Modificación','ALTO']},
+{id:'CREL_8',col:6,row:8,lbl:'CONCLUSIÓN RELACIONES',
+ sub:'Las 6 características son interdependientes:\nC2→C3, C2→C6, C1↔C4, C1→C5\nC4→C5, C3→C5, C6→C1, C6→C3, C5→C3',
+ D:'Conclusión: Las 6 características no son independientes. Sus 10 relaciones cruzadas forman una red de interdependencias: la comprensión (C2) favorece la consistencia (C3) y facilita la adquisición (C6). La expresividad (C4) determina la inferencia (C5). La modificación (C6) mantiene la cobertura (C1) y preserva la consistencia (C3).',
+ T:['Conclusión','Relaciones','Red']},
+];
+
+// ═══════════════════════════════════════════════════════════════
+// ENLACES — de padre a hijo (mismo col, fila consecutiva) + raíz a características
+// ═══════════════════════════════════════════════════════════════
+const LINKS=[];
+// Raíz → 6 características
+['C1','C2','C3','C4','C5','C6','CREL'].forEach(id=>LINKS.push({s:'R',t:id}));
+// Dentro de cada columna, fila a fila
+for(let c=0;c<7;c++){
+ const ids=['C1','C2','C3','C4','C5','C6','CREL'][c];
+ for(let r=2;r<=8;r++){
+  const suf=r===1?'':('_'+r);
+  const psuf=(r-1)===1?'':('_'+(r-1));
+  const s=r===2?ids:(ids+'_'+(r-1));
+  const t=ids+'_'+r;
+  const sn=N.find(n=>n.id===s), tn=N.find(n=>n.id===t);
+  if(sn&&tn) LINKS.push({s:s,t:t});
+ }
+}
+
+// Relaciones cruzadas entre características (fila 1)
+const CROSS=[
+ {s:'C1',t:'C4',lbl:'tensión'},{s:'C1',t:'C5',lbl:'fundamento'},
+ {s:'C2',t:'C3',lbl:'favorece'},{s:'C2',t:'C6',lbl:'facilita'},
+ {s:'C3',t:'C5',lbl:'habilita'},{s:'C4',t:'C5',lbl:'determina'},
+ {s:'C4',t:'C1',lbl:'amplía'},{s:'C6',t:'C1',lbl:'mantiene'},
+ {s:'C6',t:'C3',lbl:'preserva'},{s:'C5',t:'C3',lbl:'detecta'},
+];
+
+// ═══════════════════════════════════════════════════════════════
+// POSICIONES
+// ═══════════════════════════════════════════════════════════════
+const posOf=id=>{
+ const n=N.find(x=>x.id===id); if(!n) return null;
+ // col 0-5 para C1-C6, col 6 para CREL
+ return {
+  x: n.col*(CW+GX),
+  y: py(n.row)
+ };
+};
+
+// Calcular el offset para centrar ROOT sobre las características
+// Las 7 columnas van de 0..6, centrado en col 3
+const totalW=7*(CW+GX)-GX;
+const centerX=totalW/2-CW/2;
+
+// Ancho total del SVG
+const SVG_W=totalW+80;
+const SVG_H=py(8)+CH+60;
+
+// ═══════════════════════════════════════════════════════════════
+// RENDER
+// ═══════════════════════════════════════════════════════════════
+const WW=window.innerWidth,WH=window.innerHeight;
+const svg2=d3.select('#svg').attr('width',WW).attr('height',WH);
+const defs2=svg2.append('defs');
+const mkA2=(id,col)=>defs2.append('marker').attr('id',id)
+ .attr('viewBox','0 0 10 10').attr('refX',10).attr('refY',5)
+ .attr('markerWidth',4).attr('markerHeight',4).attr('orient','auto-start-reverse')
+ .append('path').attr('d','M1 2L9 5L1 8').attr('fill','none')
+ .attr('stroke',col).attr('stroke-width',2).attr('stroke-linecap','round');
+mkA2('ah2','#2563eb'); mkA2('ax2','#f97316');
+
+const gMain=svg2.append('g');
+const gX=gMain.append('g').attr('id','gx');
+const gE=gMain.append('g');
+const gN=gMain.append('g');
+
+// Zoom
+const zoom2=d3.zoom().scaleExtent([0.05,3])
+ .on('zoom',e=>gMain.attr('transform',e.transform));
+svg2.call(zoom2);
+
+// Índice de posiciones
+const POS={};
+N.forEach(n=>{
+ let x=n.col*(CW+GX)+40;
+ if(n.id==='R') x=centerX+40;
+ POS[n.id]={x,y:py(n.row),w:CW,h:CH};
+});
+
+// EDGES
+LINKS.forEach(lk=>{
+ const s=POS[lk.s],t=POS[lk.t]; if(!s||!t)return;
+ const x1=s.x+CW/2,y1=s.y+CH;
+ const x2=t.x+CW/2,y2=t.y;
+ const my=(y1+y2)/2;
+ gE.append('path').attr('class','edge')
+  .attr('d',`M${x1},${y1} C${x1},${my} ${x2},${my} ${x2},${y2}`)
+  .attr('stroke','#1e3a5f').attr('stroke-width',1)
+  .attr('marker-end','url(#ah2)');
+});
+
+// NODOS
+N.forEach(n=>{
+ const p=POS[n.id]; if(!p)return;
+ const row=n.row;
+ const def=LC[Math.min(row,8)];
+ const c=n.col_c?n.col_c:
+  (n.id==='R'?LC[0]:n.id.startsWith('C')&&n.id.length<=2?LC[1]:def);
+
+ const g2=gN.append('g').attr('class','nc')
+  .attr('transform',`translate(${p.x},${p.y})`)
+  .on('click',()=>showP(n));
+
+ // Sombra
+ g2.append('rect').attr('x',2).attr('y',2).attr('width',CW).attr('height',CH)
+  .attr('rx',5).attr('fill','rgba(0,0,0,.4)');
+ // Caja
+ g2.append('rect').attr('class','nr').attr('width',CW).attr('height',CH)
+  .attr('rx',5).attr('fill',c.f).attr('stroke',c.s).attr('stroke-width',.8);
+
+ // Badge nivel
+ if(n.nv){
+  const bc=n.nv==='ALTO'?{f:'#052e16',s:'#16a34a',t:'#bbf7d0'}
+   :n.nv==='MEDIO'?{f:'#431407',s:'#ea580c',t:'#fed7aa'}
+   :{f:'#450a0a',s:'#dc2626',t:'#fecaca'};
+  g2.append('rect').attr('x',CW-46).attr('y',4).attr('width',42).attr('height',12)
+   .attr('rx',2).attr('fill',bc.f).attr('stroke',bc.s).attr('stroke-width',.5);
+  g2.append('text').attr('x',CW-25).attr('y',13).attr('text-anchor','middle')
+   .attr('fill',bc.t).attr('font-size','7px').attr('font-weight','700')
+   .attr('font-family','Inter,sans-serif').text(n.nv);
+ }
+
+ // Función para romper texto largo en líneas que quepan en CW-10px
+ function wrapText(text, maxChars){
+  const words=text.split(' ');
+  const lines=[];
+  let cur='';
+  words.forEach(w=>{
+   if((cur+' '+w).trim().length>maxChars && cur.length>0){
+    lines.push(cur.trim());
+    cur=w;
+   } else {
+    cur=(cur+' '+w).trim();
+   }
+  });
+  if(cur) lines.push(cur.trim());
+  return lines;
+ }
+
+ // Título — auto-wrap a ~22 caracteres por línea
+ const rawTlines = n.lbl.split('\n');
+ const tlines = rawTlines.flatMap(l => wrapText(l, 22));
+ const tSz = n.id==='R' ? 9.5 : n.row===1 ? 9 : 8.5;
+ const tLineH = 10;
+ const tY = n.nv ? 20 : 13;
+ tlines.forEach((ln,i)=>{
+  g2.append('text').attr('class','nt').attr('x',CW/2).attr('y',tY+i*tLineH)
+   .attr('text-anchor','middle').attr('fill',c.t)
+   .attr('font-size',tSz+'px').attr('font-weight','600')
+   .attr('font-family','Inter,sans-serif').text(ln);
+ });
+
+ // Sub — auto-wrap a ~24 chars, fuente más pequeña
+ if(n.sub){
+  const rawSlines = n.sub.split('\n');
+  const slines = rawSlines.flatMap(l => wrapText(l, 24));
+  const sLineH = 9;
+  const sY = tY + tlines.length * tLineH + 3;
+  slines.forEach((ln,i)=>{
+   const yPos = sY + i * sLineH;
+   if(yPos < CH - 3){
+    g2.append('text').attr('class','ns').attr('x',CW/2).attr('y',yPos)
+     .attr('text-anchor','middle').attr('fill',c.t)
+     .attr('font-size','7px').attr('opacity','.68')
+     .attr('font-family','Inter,sans-serif').text(ln);
+   }
+  });
+ }
+});
+
+// RELACIONES CRUZADAS
+let showX=true;
+function drawX(){
+ gX.selectAll('*').remove();
+ if(!showX)return;
+ CROSS.forEach(cr=>{
+  const s=POS[cr.s],t=POS[cr.t]; if(!s||!t)return;
+  const x1=s.x+CW/2,y1=s.y+CH/2;
+  const x2=t.x+CW/2,y2=t.y+CH/2;
+  const bend=60+Math.abs(x2-x1)*0.2;
+  gX.append('path').attr('class','xedge')
+   .attr('d',`M${x1},${y1} C${x1},${y1-bend} ${x2},${y2-bend} ${x2},${y2}`)
+   .attr('stroke','#f97316').attr('stroke-width',1.5)
+   .attr('marker-end','url(#ax2)');
+  const mx=(x1+x2)/2,my=Math.min(y1,y2)-bend/2;
+  gX.append('rect').attr('x',mx-28).attr('y',my-7).attr('width',56).attr('height',11)
+   .attr('rx',2).attr('fill','#07090f').attr('opacity',.9);
+  gX.append('text').attr('x',mx).attr('y',my+1.5)
+   .attr('text-anchor','middle').attr('fill','#f97316')
+   .attr('font-size','7px').attr('font-family','Inter,sans-serif').text(cr.lbl);
+ });
+}
+drawX();
+
+// ── LEYENDA PERMANENTE dentro del SVG ──────────────────────────────────────
+(function drawLegend(){
+  const allY = N.map(n => POS[n.id]?.y || 0);
+  const allX = N.map(n => POS[n.id]?.x || 0);
+  const lastY  = Math.max(...allY) + CH + 40;
+  const firstX = Math.min(...allX) - 10;
+  const legW   = Math.max(...allX) + CW + 10 - firstX;
+  // altura: título 28 + sección colores (10 items en 2 filas) 66 + sep 16 + sección líneas 52 + sección niveles 48 + padding 20
+  const legH   = 240;
+  const lx = firstX, ly = lastY;
+  const PAD = 20; // padding horizontal interno
+  const lg = gMain.append('g').attr('id','gleg');
+
+  // ── Fondo general ────────────────────────────────────────────────────────
+  lg.append('rect')
+    .attr('x',lx).attr('y',ly).attr('width',legW).attr('height',legH)
+    .attr('rx',12).attr('fill','#0a0f1e').attr('stroke','#2563eb').attr('stroke-width',2);
+
+  // ── Título ───────────────────────────────────────────────────────────────
+  lg.append('rect')
+    .attr('x',lx).attr('y',ly).attr('width',legW).attr('height',32)
+    .attr('rx',12).attr('fill','#0f2040');
+  lg.append('rect') // tapa esquinas inferiores del título
+    .attr('x',lx).attr('y',ly+20).attr('width',legW).attr('height',12)
+    .attr('fill','#0f2040');
+  lg.append('text')
+    .attr('x',lx+legW/2).attr('y',ly+21)
+    .attr('text-anchor','middle').attr('dominant-baseline','middle')
+    .attr('fill','#93c5fd').attr('font-size','13px').attr('font-weight','700')
+    .attr('font-family','Inter,sans-serif').attr('letter-spacing','1')
+    .text('LEYENDA DEL MAPA CONCEPTUAL');
+
+  // ── SECCIÓN 1: Colores de nodos ──────────────────────────────────────────
+  const SEC1_Y = ly + 42;
+  lg.append('text')
+    .attr('x',lx+PAD).attr('y',SEC1_Y)
+    .attr('fill','#60a5fa').attr('font-size','9px').attr('font-weight','700')
+    .attr('font-family','Inter,sans-serif').attr('letter-spacing','.5')
+    .text('COLORES DE NODOS:');
+
+  const colorItems = [
+    {f:'#0c2640', s:'#0ea5e9', label:'Nodo raíz'},
+    {f:'#0f2040', s:'#3b82f6', label:'Fila 1 — Las 6 Características'},
+    {f:'#062b1a', s:'#10b981', label:'Fila 2 — Dimensiones de análisis'},
+    {f:'#0a2010', s:'#22c55e', label:'Fila 3 — Evidencias concretas'},
+    {f:'#200a3a', s:'#a855f7', label:'Fila 4 — Reglas y técnicas'},
+    {f:'#281400', s:'#f59e0b', label:'Fila 5 — Implicaciones'},
+    {f:'#0a1830', s:'#60a5fa', label:'Fila 6 — Formalismos alternativos'},
+    {f:'#0d1a10', s:'#4ade80', label:'Fila 7 — Relaciones entre caract.'},
+    {f:'#2a0808', s:'#f87171', label:'Fila 8 — Conclusión'},
+    {f:'#380808', s:'#ef4444', label:'Nodo de LIMITACIÓN (borde rojo)'},
+  ];
+
+  // 2 filas × 5 columnas
+  const COLS_C = 5;
+  const itemW  = (legW - PAD*2) / COLS_C;
+  const BOX = 14; // tamaño del cuadrito de color
+  const ROW_H = 22;
+
+  colorItems.forEach((item, i) => {
+    const col = i % COLS_C;
+    const row = Math.floor(i / COLS_C);
+    const ix  = lx + PAD + col * itemW;
+    const iy  = SEC1_Y + 14 + row * ROW_H;
+
+    // Cuadrito de color
+    lg.append('rect')
+      .attr('x', ix).attr('y', iy - BOX/2 + 1)
+      .attr('width', BOX).attr('height', BOX).attr('rx', 3)
+      .attr('fill', item.f).attr('stroke', item.s).attr('stroke-width', 1.2);
+
+    // Texto etiqueta
+    lg.append('text')
+      .attr('x', ix + BOX + 6).attr('y', iy + 4)
+      .attr('fill', '#cbd5e1').attr('font-size', '9px')
+      .attr('font-family', 'Inter,sans-serif')
+      .text(item.label);
+  });
+
+  // ── Separador 1 ──────────────────────────────────────────────────────────
+  const SEP1_Y = SEC1_Y + 14 + 2 * ROW_H + 10;
+  lg.append('line')
+    .attr('x1', lx+PAD).attr('y1', SEP1_Y)
+    .attr('x2', lx+legW-PAD).attr('y2', SEP1_Y)
+    .attr('stroke','#1e3a5f').attr('stroke-width',1).attr('stroke-dasharray','4,3');
+
+  // ── SECCIÓN 2: Tipos de línea ────────────────────────────────────────────
+  const SEC2_Y = SEP1_Y + 18;
+  lg.append('text')
+    .attr('x',lx+PAD).attr('y',SEC2_Y)
+    .attr('fill','#60a5fa').attr('font-size','9px').attr('font-weight','700')
+    .attr('font-family','Inter,sans-serif').attr('letter-spacing','.5')
+    .text('TIPOS DE LÍNEA:');
+
+  const lineItems = [
+    { type:'solid',  color:'#2563eb',
+      title:'Línea continua azul',
+      desc:'Enlace jerárquico — relación padre → hijo entre niveles del mapa' },
+    { type:'dashed', color:'#f97316',
+      title:'Línea punteada naranja',
+      desc:'Relación cruzada — interdependencia semántica entre 2 de las 6 Características' },
+  ];
+
+  const halfW = (legW - PAD*2) / 2;
+  lineItems.forEach((item, i) => {
+    const ix   = lx + PAD + i * halfW;
+    const iy   = SEC2_Y + 18;
+    const LINE = 48;
+
+    // Línea de muestra
+    lg.append('line')
+      .attr('x1', ix).attr('y1', iy)
+      .attr('x2', ix + LINE).attr('y2', iy)
+      .attr('stroke', item.color).attr('stroke-width', 2.5)
+      .attr('stroke-dasharray', item.type==='dashed' ? '7,4' : 'none');
+
+    // Punta de flecha
+    lg.append('polygon')
+      .attr('points',`${ix+LINE},${iy-5} ${ix+LINE+10},${iy} ${ix+LINE},${iy+5}`)
+      .attr('fill', item.color);
+
+    // Título de la línea (negrita)
+    lg.append('text')
+      .attr('x', ix + LINE + 16).attr('y', iy - 3)
+      .attr('fill', '#e2e8f0').attr('font-size', '9.5px').attr('font-weight', '700')
+      .attr('font-family', 'Inter,sans-serif')
+      .text(item.title);
+
+    // Descripción
+    lg.append('text')
+      .attr('x', ix + LINE + 16).attr('y', iy + 10)
+      .attr('fill', '#94a3b8').attr('font-size', '8.5px')
+      .attr('font-family', 'Inter,sans-serif')
+      .text(item.desc);
+  });
+
+  // ── Separador 2 ──────────────────────────────────────────────────────────
+  const SEP2_Y = SEC2_Y + 44;
+  lg.append('line')
+    .attr('x1', lx+PAD).attr('y1', SEP2_Y)
+    .attr('x2', lx+legW-PAD).attr('y2', SEP2_Y)
+    .attr('stroke','#1e3a5f').attr('stroke-width',1).attr('stroke-dasharray','4,3');
+
+  // ── SECCIÓN 3: Niveles de cumplimiento ───────────────────────────────────
+  const SEC3_Y = SEP2_Y + 18;
+  lg.append('text')
+    .attr('x',lx+PAD).attr('y',SEC3_Y)
+    .attr('fill','#60a5fa').attr('font-size','9px').attr('font-weight','700')
+    .attr('font-family','Inter,sans-serif').attr('letter-spacing','.5')
+    .text('NIVELES DE CUMPLIMIENTO DE CADA CARACTERÍSTICA:');
+
+  const nvItems = [
+    {f:'#052e16', s:'#16a34a', t:'#bbf7d0', nv:'ALTO',  desc:'La representación cumple sólidamente esta característica'},
+    {f:'#431407', s:'#ea580c', t:'#fed7aa', nv:'MEDIO', desc:'Cumplimiento parcial — existen limitaciones expresivas'},
+    {f:'#450a0a', s:'#dc2626', t:'#fecaca', nv:'BAJO',  desc:'Brecha importante — el formalismo no satisface esta característica directamente'},
+  ];
+
+  const nvW = (legW - PAD*2) / 3;
+  nvItems.forEach((item, i) => {
+    const ix = lx + PAD + i * nvW;
+    const iy = SEC3_Y + 18;
+    const BADGE_W = 46, BADGE_H = 16;
+
+    // Badge
+    lg.append('rect')
+      .attr('x', ix).attr('y', iy - BADGE_H/2)
+      .attr('width', BADGE_W).attr('height', BADGE_H).attr('rx', 4)
+      .attr('fill', item.f).attr('stroke', item.s).attr('stroke-width', 1.2);    lg.append('text')
+      .attr('x', ix + BADGE_W/2).attr('y', iy + 1)
+      .attr('text-anchor','middle')
+      .attr('fill', item.t).attr('font-size', '8px').attr('font-weight', '700')
+      .attr('font-family', 'Inter,sans-serif')
+      .attr('dy', '0.35em')
+      .text(item.nv);
+
+    // Descripción
+    lg.append('text')
+      .attr('x', ix + BADGE_W + 10).attr('y', iy + 1)
+      .attr('fill', '#94a3b8').attr('font-size', '8.5px')
+      .attr('font-family', 'Inter,sans-serif')
+      .attr('dy', '0.35em')
+      .text(item.desc);
+  });
+
+})();
+
+// Panel
+function showP(n){
+ document.getElementById('pt').textContent=n.lbl.replace(/\n/g,' ');
+ const bc=n.nv==='ALTO'?{f:'#052e16',s:'#16a34a',t:'#bbf7d0'}
+  :n.nv==='MEDIO'?{f:'#431407',s:'#ea580c',t:'#fed7aa'}
+  :n.nv==='BAJO'?{f:'#450a0a',s:'#dc2626',t:'#fecaca'}:null;
+ document.getElementById('pnv').innerHTML=bc
+  ?`<span style="display:inline-block;padding:2px 8px;border-radius:4px;margin-bottom:6px;font-size:9px;font-weight:700;background:${bc.f};color:${bc.t};border:1px solid ${bc.s}">${n.nv}</span>`:'';
+ document.getElementById('pd').textContent=n.D||'';
+ document.getElementById('pg').innerHTML=(n.T||[]).map(t=>`<span class="tag">${t}</span>`).join('');
+ document.getElementById('panel').style.display='block';
+}
+
+// Controles
+function toggleX(){
+ showX=!showX;
+ document.getElementById('bX').classList.toggle('on',showX);
+ document.getElementById('bX').textContent=showX?'⇆ Relaciones cruzadas':'⇆ Relaciones cruzadas OFF';
+ drawX();
+}
+
+function fitView(){
+ const allX=N.map(n=>POS[n.id]?.x||0);
+ const allY=N.map(n=>POS[n.id]?.y||0);
+ const x0=Math.min(...allX)-10, y0=Math.min(...allY)-10;
+ const x1=Math.max(...allX)+CW+10;
+ // incluir leyenda: +138px (legH) + 36px margen
+ const y1=Math.max(...allY)+CH+36+240+20;
+ const sc=Math.min(WW/(x1-x0),(WH-44)/(y1-y0))*0.93;
+ svg2.transition().duration(700).call(zoom2.transform,
+  d3.zoomIdentity.translate(WW/2-sc*(x0+x1)/2,(WH-44)/2+44-sc*(y0+y1)/2).scale(sc));
+}
+
+// Exportar PNG usando html2canvas vía SVG serialization
+function dl(){
+ // Crear SVG standalone
+ const s=document.getElementById('svg');
+ const ser=new XMLSerializer();
+ const src=ser.serializeToString(s);
+ const img=new Image();
+ const blob=new Blob([src],{type:'image/svg+xml'});
+ const url=URL.createObjectURL(blob);
+ img.onload=()=>{
+  const cv=document.getElementById('cv');
+  cv.width=s.clientWidth*2; cv.height=s.clientHeight*2;
+  const ctx=cv.getContext('2d');
+  ctx.fillStyle='#07090f'; ctx.fillRect(0,0,cv.width,cv.height);
+  ctx.scale(2,2);
+  ctx.drawImage(img,0,0);
+  URL.revokeObjectURL(url);
+  const a=document.createElement('a');
+  a.download='mapa_conceptual_debugging.png';
+  a.href=cv.toDataURL('image/png');
+  a.click();
+ };
+ img.src=url;
+}
+
+// Vista inicial — fit automático al cargar
+setTimeout(fitView,150);
+</script>
+</body>
+</html>
