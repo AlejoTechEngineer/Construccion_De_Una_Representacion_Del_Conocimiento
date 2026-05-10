@@ -1,8 +1,6 @@
 # 🧠 Laboratorio No. 1 — Construcción de una Representación del Conocimiento
 
 **Asignatura:** Sistemas Inteligentes  
-**Estudiante:** Alejandro De Mendoza Tovar  
-**Profesor:** Ing. Juan Carlos Reyes Figueroa  
 **Universidad:** Fundación Universitaria Internacional de La Rioja  
 **Fecha:** Mayo 2026  
 
