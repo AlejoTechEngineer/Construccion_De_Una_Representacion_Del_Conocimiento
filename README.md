@@ -170,7 +170,7 @@ Para transformar el mapa conceptual en un sistema ejecutable:
 ## 👨‍💻 Autor
 
 **Alejandro De Mendoza Tovar**  
-Estudiante de Ingeniería Informática  
+Ingeniero Informático / Especialista IA / Máster Arquitectura Software
 Fundación Universitaria Internacional de La Rioja  
 GitHub: [@AlejoTechEngineer](https://github.com/AlejoTechEngineer)
 
