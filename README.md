@@ -181,3 +181,18 @@ GitHub: [@AlejoTechEngineer](https://github.com/AlejoTechEngineer)
 ---
 
 *Laboratorio No. 1 — Sistemas Inteligentes — Mayo 2026*
+## Arquitectura
+
+```mermaid
+flowchart TD
+    A[mapa_conceptual_debugging.html] --> B[D3.js v7 - cdnjs]
+    A --> C[Google Fonts - Inter]
+    B --> D[SVG - grafo de nodos - 7 columnas x 8 niveles]
+    D --> E[Nodos: conceptos de debugging]
+    D --> F[Edges - relaciones entre conceptos]
+    E --> G{Panel interactivo de detalle}
+    F --> G
+    G --> H[Zoom / Pan / Drag sobre SVG]
+    A --> I[Representacion del conocimiento: Resolver un Bug en Codigo]
+    I --> J[Formalismo: CLIPS / Prolog / OWL / HTN]
+```
