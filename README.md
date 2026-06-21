@@ -1,8 +1,14 @@
+<div align="center">
+
 # 🧠 Laboratorio No. 1 — Construcción de una Representación del Conocimiento
 
 **Asignatura:** Sistemas Inteligentes  
 **Universidad:** Fundación Universitaria Internacional de La Rioja  
-**Fecha:** Mayo 2026  
+**Fecha:** Mayo 2026
+
+</div>
+
+---
 
 ---
 
